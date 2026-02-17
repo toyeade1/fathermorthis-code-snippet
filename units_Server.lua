@@ -1,57 +1,64 @@
--- @ Services
+--[[
+	Units_Client.lua
+	Author: FatherMortis
+
+	- Uses existing project modules:
+		- ReplicatedStorage.Modules.Spring (and Spring.Usage)
+		- ReplicatedStorage.Modules.QuickFunctions (OpenAndClose, QuickFunctions)
+		- script.Helper
+		- script.Options (UnitOptions)
+]]
+
+--// Services
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local UserInputService = game:GetService("UserInputService")
 local SoundService = game:GetService("SoundService")
-local GuiService = game:GetService("GuiService")
 local CollectionService = game:GetService("CollectionService")
 local TweenService = game:GetService("TweenService")
-local Remotes = ReplicatedStorage:WaitForChild("Assets"):WaitForChild("Remotes")
-local UnitsOptionsHandler = Remotes:WaitForChild("UnitOptionsHandler")
 
--- @ Player References
+--// Player refs
 local Player = Players.LocalPlayer
-local Mouse = Player:GetMouse()
 local PlayerGui = Player:WaitForChild("PlayerGui")
 local MainGui = PlayerGui:WaitForChild("MainGui")
 
--- @ GUI References
-local Samples = MainGui:WaitForChild("Samples")
+--// Replicated refs (cache long paths once)
+local Assets = ReplicatedStorage:WaitForChild("Assets")
+local Remotes = Assets:WaitForChild("Remotes")
+local Settings = ReplicatedStorage:WaitForChild("Settings")
+
+local UnitsAssets = Assets:WaitForChild("Units")
+local Animations = Assets:WaitForChild("Animations")
+local Objects = Assets:WaitForChild("Objects")
+
+local UnitsOptionsHandler = Remotes:WaitForChild("UnitOptionsHandler") -- kept for parity; used by other modules
+
+--// UI refs
 local Windows = MainGui:WaitForChild("Windows")
 local Units_Window = Windows:WaitForChild("Units")
-local Unit_Slots_Holder = Units_Window.Main.Base.Slots
-local Unit_Showcase = MainGui:WaitForChild("UnitShowcase")
-local SearchBox = Units_Window.Search.Input
-local toolTipParent = Units_Window:WaitForChild("Main")
-local unitTip = toolTipParent:WaitForChild("UnitTip")
-local unitButtonTip = toolTipParent:WaitForChild("UnitButtonTip")
 
--- @ Options/Buttons
+local Samples = MainGui:WaitForChild("Samples")
+local Unit_Showcase = MainGui:WaitForChild("UnitShowcase")
+
+local UnitsMain = Units_Window:WaitForChild("Main")
+local Unit_Slots_Holder = UnitsMain.Base.Slots
+local SearchBox = Units_Window.Search.Input
+
+local unitTip = UnitsMain:WaitForChild("UnitTip")
+local unitButtonTip = UnitsMain:WaitForChild("UnitButtonTip")
+
+--// Options buttons
 local Options = unitButtonTip.Options.ScrollingFrame
 local equipButton = Options.Equip
 local viewButton = Options.View
 local cancelButton = Options.Cancel
 local lockButton = Options.Lock
---local selectButton = Options.Select
 
--- Options/UI Buttons
+--// UI Buttons
 local UIOptions = Units_Window:WaitForChild("BTNs"):WaitForChild("Content")
-local unequipAllButton = UIOptions.UnequipAll
+local UnequipAllButton = UIOptions.UnequipAll
 
--- @ Important Variables
-local CurrentlySelected = nil
-local SelectedPosConn = nil
-local MaxEquipSlots = ReplicatedStorage.Settings:GetAttribute("MaxEquipSlots")
-
-local SlotConnections = {} 
-local UnitSlotsDictionary = {}
-local PreviousUnitSlotsDictionary = {}
-
--- @ Modules
-local Classes = ReplicatedStorage:WaitForChild("Classes")
-local Modules = ReplicatedStorage:WaitForChild("Modules")
-
--- @ Requires
+--// Modules
 local Spring = require(ReplicatedStorage.Modules:WaitForChild("Spring"))
 local SpringUsage = require(ReplicatedStorage.Modules:WaitForChild("Spring"):WaitForChild("Usage"))
 local OpenAndClose = require(ReplicatedStorage.Modules:WaitForChild("QuickFunctions"):WaitForChild("OpenAndClose"))
@@ -59,17 +66,40 @@ local QuickFunctions = require(ReplicatedStorage.Modules:WaitForChild("QuickFunc
 local Helper = require(script.Helper)
 local UnitOptions = require(script.Options)
 
--- @ ToolTip Stats
+--// Constants
 local DESIGN_RES = Vector2.new(1920, 1080)
 local X_OFFSET_PX = 100
 local Y_OFFSET_PX = 180
-local X_OFF_SCALE = X_OFFSET_PX / DESIGN_RES.X
-local Y_OFF_SCALE = Y_OFFSET_PX / DESIGN_RES.Y
 
--- @ Main Module
+local MaxEquipSlots = Settings:GetAttribute("MaxEquipSlots") or 0
+
+--// Debugger
+-- This logger is intentionally lightweight:
+-- - It adds consistent prefixes so logs are searchable in the output.
+local DEBUG_ENABLED = false
+
+local function debugPrint(...)
+	if not DEBUG_ENABLED then
+		return
+	end
+	print("[Units_Client]", ...)
+end
+
+local function debugWarn(...)
+	if not DEBUG_ENABLED then
+		return
+	end
+	warn("[Units_Client]", ...)
+end
+
+--// State
 local Units_Client = {}
+local CurrentlySelected: GuiObject? = nil
+local SelectedPosConn: RBXScriptConnection? = nil
 
--- @ Rarity Definitions
+local SlotConnections: { [Instance]: RBXScriptConnection } = {}
+
+--// Rarity / Type visual definitions
 local RarityProperties = {
 	Rare = { Order = 2, Color = Color3.fromRGB(0, 170, 255) },
 	Epic = { Order = 3, Color = Color3.fromRGB(114, 57, 171) },
@@ -77,69 +107,57 @@ local RarityProperties = {
 	Mythic = { Order = 5, Color = Color3.fromRGB(255, 0, 255) },
 }
 
--- @ UnitType Definitions
 local UnitTypeProperties = {
 	Roaming = { Order = 2, Color = Color3.fromRGB(0, 170, 255) },
 	Stationary = { Order = 3, Color = Color3.fromRGB(114, 57, 171) },
 	Guardian = { Order = 4, Color = Color3.fromRGB(255, 85, 0) },
 }
 
--- @ Helper: Lighten Color
-local function lightenColor(color, factor)
+--// Color helpers
+local function lightenColor(color: Color3, factor: number): Color3
 	return color:Lerp(Color3.new(1, 1, 1), factor)
 end
 
--- @ Helper: Darken Color
-local function darkenColor(color, factor)
+local function darkenColor(color: Color3, factor: number): Color3
 	factor = math.clamp(factor, 0, 1)
 	return Color3.new(color.R * (1 - factor), color.G * (1 - factor), color.B * (1 - factor))
 end
 
--- @ Helper: Get Sort Order by Rarity
-local function getRarityOrder(rarity)
-	return RarityProperties[rarity] and RarityProperties[rarity].Order or 1
+local function getRarityOrder(rarity: string): number
+	local props = RarityProperties[rarity]
+	return props and props.Order or 1
 end
 
--- @ Helper: Deselect Current Unit
-local function deselectCurrentUnit()
-	if CurrentlySelected then
-		Helper:DeselectUnit(CurrentlySelected, nil, CurrentlySelected)
-		CurrentlySelected:SetAttribute("CurrentlySelected", false)
-		CurrentlySelected.SelectedOverlay.Visible = false
-		CurrentlySelected.Focus.Visible = false
-		CurrentlySelected.ZIndex = 1
-		CurrentlySelected = nil
-
-		Unit_Showcase.Visible = false
-		unitTip.Visible = false
-		unitButtonTip.Visible = false
-		
-		local moveTarget = { Position = MainGui:WaitForChild("Buttons"):GetAttribute("Show") }
-		SpringUsage:LaunchSpring(MainGui:WaitForChild("Buttons"), 1, 3, moveTarget, true)
-
-		local moveTarget2 = { Position = MainGui:WaitForChild("HUD"):GetAttribute("Show") }
-		SpringUsage:LaunchSpring(MainGui:WaitForChild("HUD"), 1, 3, moveTarget2, true)
-		
-		local moveTarget3 = { Position = MainGui:WaitForChild("OtherButtons"):GetAttribute("Show") }
-		SpringUsage:LaunchSpring(MainGui:WaitForChild("OtherButtons"), 1, 3, moveTarget3, true)
-
-		local startProps = { Position = Units_Window:GetAttribute("Show") }
-		SpringUsage:LaunchSpring(Units_Window, 0.45, 3, startProps, true)
-	end
+--// UI movement helpers
+local function springToHudState()
+	debugPrint("springToHudState()")
+	SpringUsage:LaunchSpring(MainGui:WaitForChild("Buttons"), 1, 3, { Position = MainGui.Buttons:GetAttribute("Show") }, true)
+	SpringUsage:LaunchSpring(MainGui:WaitForChild("HUD"), 1, 3, { Position = MainGui.HUD:GetAttribute("Show") }, true)
+	SpringUsage:LaunchSpring(MainGui:WaitForChild("OtherButtons"), 1, 3, { Position = MainGui.OtherButtons:GetAttribute("Show") }, true)
+	SpringUsage:LaunchSpring(Units_Window, 0.45, 3, { Position = Units_Window:GetAttribute("Show") }, true)
 end
 
--- @ Helper: This will allow for the gradient of each button to be looped.
+local function springToSelectedState()
+	debugPrint("springToSelectedState()")
+	SpringUsage:LaunchSpring(MainGui:WaitForChild("Buttons"), 1, 3, { Position = MainGui.Buttons:GetAttribute("Hide") }, true)
+	SpringUsage:LaunchSpring(MainGui:WaitForChild("HUD"), 1, 3, { Position = MainGui.HUD:GetAttribute("Selected") }, true)
+	SpringUsage:LaunchSpring(MainGui:WaitForChild("OtherButtons"), 1, 3, { Position = MainGui.OtherButtons:GetAttribute("Hide") }, true)
+	SpringUsage:LaunchSpring(Units_Window, 0.45, 3, { Position = Units_Window:GetAttribute("Selected") }, true)
+end
 
-local activeGradientLoop = {}
+--// Gradient loop manager
+local activeGradientLoop = {
+	task = nil :: thread?,
+	cancel = nil :: (() -> ())?
+}
 
-local function StartGradientLoop(gradientMap: { UIGradient }, speed: number)
-	-- Cancel existing loop if active
+local function StartGradientLoop(gradientMap: { UIGradient }, speed: number): (() -> ())
 	if activeGradientLoop.task then
-		activeGradientLoop.task:Cancel()
+		debugPrint("Cancelling existing gradient loop")
+		task.cancel(activeGradientLoop.task)
 		activeGradientLoop.task = nil
 	end
 
-	-- Set initial offset
 	for _, gradient in ipairs(gradientMap) do
 		if gradient and gradient:IsDescendantOf(game) then
 			gradient.Offset = Vector2.new(-1.8, 0)
@@ -147,10 +165,10 @@ local function StartGradientLoop(gradientMap: { UIGradient }, speed: number)
 	end
 
 	activeGradientLoop.task = task.spawn(function()
-		while Units_Window and Units_Window:IsDescendantOf(game) and Units_Window.Visible do
-			local tweens = {}
+		debugPrint("Gradient loop started; gradients:", #gradientMap)
+		while Units_Window:IsDescendantOf(game) and Units_Window.Visible do
+			local tweens = table.create(#gradientMap)
 
-			-- Tween all gradients forward
 			for i, gradient in ipairs(gradientMap) do
 				if gradient and gradient:IsDescendantOf(game) then
 					local tween = TweenService:Create(
@@ -163,185 +181,276 @@ local function StartGradientLoop(gradientMap: { UIGradient }, speed: number)
 				end
 			end
 
-			-- Wait for one tween to complete (they're all same speed)
-			local ok, err = pcall(function()
-				if tweens[1] then
+			if tweens[1] then
+				local ok, err = pcall(function()
 					tweens[1].Completed:Wait()
-				else
-					task.wait(speed)
+				end)
+				if not ok then
+					debugWarn("Gradient loop interrupted:", err)
+					break
 				end
-			end)
+			else
+				task.wait(speed)
+			end
 
-			-- Reset offsets after the tween
-			for i, gradient in ipairs(gradientMap) do
+			for _, gradient in ipairs(gradientMap) do
 				if gradient and gradient:IsDescendantOf(game) then
-					if gradient.Parent:IsA("UIStroke") then
-						local parent = gradient.Parent
-						local props = {
-							Color = gradient.Color,
-							Rotation = gradient.Rotation,
-							Transparency = gradient.Transparency,
-						}
-						gradient:Destroy()
-						local newGradient = Instance.new("UIGradient")
-						for prop, val in props do
-							newGradient[prop] = val
-						end
-						newGradient.Offset = Vector2.new(-1.8, 0)
-						newGradient.Parent = parent
-						gradientMap[i] = newGradient
-					else
-						gradient.Offset = Vector2.new(-1.8, 0)
-					end
+					gradient.Offset = Vector2.new(-1.8, 0)
 				end
 			end
 		end
-
-		activeGradientLoop.task = nil
+		debugPrint("Gradient loop ended (window hidden or destroyed)")
 	end)
 
-	return function()
+	local function cancel()
 		if activeGradientLoop.task then
-			activeGradientLoop.task:Cancel()
+			debugPrint("Gradient loop cancelled")
+			task.cancel(activeGradientLoop.task)
 			activeGradientLoop.task = nil
 		end
 	end
+
+	activeGradientLoop.cancel = cancel
+	return cancel
 end
 
--- @ Showcase Unit Preview
-function Units_Client:UpdateShowcase(unitFolder)
+--// Data helpers
+local function getInventory(KeptData)
+	return KeptData and KeptData.Units and KeptData.Units.Inventory
+end
+
+local function getUnitFolderFromSlot(KeptData, slot: Instance): Instance?
+	local inv = getInventory(KeptData)
+	if not inv then
+		return nil
+	end
+	return inv:FindFirstChild(slot.Name)
+end
+
+local function isUnitEquipped(KeptData, unitFolder: Instance): boolean
+	if not KeptData or not KeptData.Units or not KeptData.Units.Equipped then
+		return false
+	end
+
+	for i = 1, MaxEquipSlots do
+		local slotName = "Unit" .. tostring(i)
+		if KeptData.Units.Equipped:GetAttribute(slotName) == unitFolder.Name then
+			return true
+		end
+	end
+
+	return false
+end
+
+--// Selection helpers
+local function clearSelectionVisuals(selectedSlot: GuiObject)
+	selectedSlot:SetAttribute("CurrentlySelected", false)
+
+	if selectedSlot:FindFirstChild("SelectedOverlay") then
+		selectedSlot.SelectedOverlay.Visible = false
+	end
+	if selectedSlot:FindFirstChild("Focus") then
+		selectedSlot.Focus.Visible = false
+	end
+
+	selectedSlot.ZIndex = 1
+end
+
+local function applySelectionVisuals(selectedSlot: GuiObject)
+	selectedSlot:SetAttribute("CurrentlySelected", true)
+
+	if selectedSlot:FindFirstChild("SelectedOverlay") then
+		selectedSlot.SelectedOverlay.Visible = true
+	end
+	if selectedSlot:FindFirstChild("Focus") then
+		selectedSlot.Focus.Visible = true
+	end
+
+	selectedSlot.ZIndex = 2
+end
+
+local function hideUnitPopups()
+	Unit_Showcase.Visible = false
+	unitTip.Visible = false
+	unitButtonTip.Visible = false
+end
+
+local function deselectCurrentUnit()
+	if not CurrentlySelected then
+		return
+	end
+
+	debugPrint("Deselecting:", CurrentlySelected.Name)
+
+	Helper:DeselectUnit(CurrentlySelected, nil, CurrentlySelected)
+	clearSelectionVisuals(CurrentlySelected)
+
+	CurrentlySelected = nil
+	hideUnitPopups()
+	springToHudState()
+
+	if SelectedPosConn then
+		SelectedPosConn:Disconnect()
+		SelectedPosConn = nil
+	end
+end
+
+--// Showcase
+function Units_Client:UpdateShowcase(unitFolder: Instance)
+	if not unitFolder then
+		return
+	end
+
 	local uFName = unitFolder:GetAttribute("Name") or unitFolder.Name
+	local unitAsset = UnitsAssets:FindFirstChild(uFName)
+	if not unitAsset or not unitAsset:FindFirstChild("Model") then
+		debugWarn("Missing unit asset/model for:", uFName)
+		return
+	end
+
+	debugPrint("Showcase update for:", uFName)
 
 	Unit_Showcase.Visible = true
-
-	local moveTarget = {
-		Position = MainGui:WaitForChild("Buttons"):GetAttribute("Hide")
-	}
-	SpringUsage:LaunchSpring(MainGui:WaitForChild("Buttons"), 1, 3, moveTarget, true)
-
-	local moveTarget2 = {
-		Position = MainGui:WaitForChild("HUD"):GetAttribute("Selected")
-	}
-	SpringUsage:LaunchSpring(MainGui:WaitForChild("HUD"), 1, 3, moveTarget2, true)
-	
-	local moveTarget3 = {
-		Position = MainGui:WaitForChild("OtherButtons"):GetAttribute("Hide")
-	}
-	SpringUsage:LaunchSpring(MainGui:WaitForChild("OtherButtons"), 1, 3, moveTarget3, true)
-
-	local startProps = { Position = Units_Window:GetAttribute("Selected") }
-	SpringUsage:LaunchSpring(Units_Window, 0.45, 3, startProps, true)
+	springToSelectedState()
 
 	task.spawn(function()
 		Unit_Showcase.ViewportFrame.ImageColor3 = Color3.new(0, 0, 0)
-		
-		local revealColor = {
-			ImageColor3 = Color3.new(255, 255, 255)
-		}
-		SpringUsage:LaunchSpring(Unit_Showcase.ViewportFrame, 1, 0.1, revealColor, true)
+		SpringUsage:LaunchSpring(Unit_Showcase.ViewportFrame, 1, 0.1, { ImageColor3 = Color3.new(1, 1, 1) }, true)
 	end)
-	
+
 	Unit_Showcase.ViewportFrame.UIScale.Scale = Unit_Showcase.ViewportFrame:GetAttribute("Default")
 	SpringUsage:LaunchSpring(Unit_Showcase.ViewportFrame.UIScale, 0.45, 3, { Scale = 1 }, true)
 
-	local Unit_To_View = ReplicatedStorage.Assets.Units[uFName].Model:Clone()
-	Unit_To_View:ScaleTo(1)
-	Unit_To_View.PrimaryPart = Unit_To_View:WaitForChild("HumanoidRootPart")
-	Unit_To_View.Parent = Unit_Showcase.ViewportFrame.WorldModel
-	Unit_To_View:PivotTo(Unit_Showcase.ViewportFrame.WorldModel.Rig.PrimaryPart.CFrame)
-	Unit_To_View.Humanoid:LoadAnimation(ReplicatedStorage.Assets.Animations.Idle):Play()
+	local world = Unit_Showcase.ViewportFrame.WorldModel
+	local oldRig = world:FindFirstChild("Rig")
+	if oldRig then
+		oldRig:Destroy()
+	end
 
-	Unit_Showcase.ViewportFrame.WorldModel.Rig:Destroy()
-	Unit_To_View.Name = "Rig"
+	local unitModel = unitAsset.Model:Clone()
+	unitModel:ScaleTo(1)
+	unitModel.PrimaryPart = unitModel:WaitForChild("HumanoidRootPart")
+	unitModel.Name = "Rig"
+	unitModel.Parent = world
+
+	-- Align to the world anchor rig if it exists
+	local anchor = world:FindFirstChild("Rig")
+	if anchor and anchor:FindFirstChild("PrimaryPart") then
+		unitModel:PivotTo(anchor.PrimaryPart.CFrame)
+	elseif anchor and anchor:FindFirstChild("HumanoidRootPart") then
+		unitModel:PivotTo(anchor.HumanoidRootPart.CFrame)
+	end
+
+	local humanoid = unitModel:FindFirstChildOfClass("Humanoid")
+	if humanoid then
+		local idleAnim = Animations:FindFirstChild("Idle")
+		if idleAnim then
+			humanoid:LoadAnimation(idleAnim):Play()
+		end
+	end
 end
 
--- @ Options Tip for Unit
-function Units_Client:OptionsTip(selectedSlot, tip)
-	local function getRelativeScalePos(refUI, container, xOffsetPx, yOffsetPx)
-		local screenX = refUI.AbsolutePosition.X + refUI.AbsoluteSize.X + xOffsetPx
-		local screenY = refUI.AbsolutePosition.Y + yOffsetPx
+--// Tooltip placement + data
+local function getRelativeScalePos(refUI: GuiObject, container: GuiObject, xOffsetPx: number, yOffsetPx: number)
+	-- Convert absolute screen coordinates into container-relative Scale.
+	local screenX = refUI.AbsolutePosition.X + refUI.AbsoluteSize.X + xOffsetPx
+	local screenY = refUI.AbsolutePosition.Y + yOffsetPx
 
-		local localX  = screenX - container.AbsolutePosition.X
-		local localY  = screenY - container.AbsolutePosition.Y
+	local localX = screenX - container.AbsolutePosition.X
+	local localY = screenY - container.AbsolutePosition.Y
 
-		local sx = localX / container.AbsoluteSize.X
-		local sy = localY / container.AbsoluteSize.Y
-		
-		local selectingSlot = Player:GetAttribute("SelectingProfileSlot")
-		if selectingSlot then
-			equipButton.Visible = false
-		else
-			equipButton.Visible = true
+	return localX / container.AbsoluteSize.X, localY / container.AbsoluteSize.Y
+end
+
+function Units_Client:OptionsTip(selectedSlot: GuiObject, tip: GuiObject)
+	if not selectedSlot or not tip then
+		return
+	end
+
+	local selectingSlot = Player:GetAttribute("SelectingProfileSlot")
+	equipButton.Visible = not selectingSlot
+
+	local unitFolder = getUnitFolderFromSlot(self.KeptData, selectedSlot)
+	if not unitFolder then
+		return
+	end
+
+	local unitNameKey = unitFolder:GetAttribute("Name") or unitFolder.Name
+	local unitAsset = UnitsAssets:FindFirstChild(unitNameKey)
+	if not unitAsset then
+		debugWarn("Missing unit asset for tooltip:", unitNameKey)
+		return
+	end
+
+	tip.UnitName.Text = unitAsset:GetAttribute("DisplayName") or "Unknown"
+	tip.Level.Text = "Lv. " .. tostring(unitFolder:GetAttribute("Level") or 1)
+
+	local rarity = unitAsset:GetAttribute("Rarity") or "Rare"
+	tip.Rarity.Text = rarity
+
+	do
+		local rarityProps = RarityProperties[rarity]
+		if rarityProps then
+			local base = rarityProps.Color
+			local light = lightenColor(base, 0.5)
+			local dark = darkenColor(base, 0.15)
+
+			local grad = ColorSequence.new({
+				ColorSequenceKeypoint.new(0, light),
+				ColorSequenceKeypoint.new(1, base),
+			})
+
+			tip.Rarity.UIGradient.Color = grad
+			tip.Rarity.UIStroke.Color = dark
+			tip.UIStroke.UIGradient.Color = grad
 		end
-		
-		return sx, sy
-		
+	end
+
+	local unitType = unitAsset:GetAttribute("UnitType") or "Roaming"
+	tip.UnitType.Text = unitType
+
+	do
+		local typeProps = UnitTypeProperties[unitType]
+		if typeProps then
+			local base = typeProps.Color
+			local light = lightenColor(base, 0.5)
+			local dark = darkenColor(base, 0.15)
+
+			local grad = ColorSequence.new({
+				ColorSequenceKeypoint.new(0, light),
+				ColorSequenceKeypoint.new(1, base),
+			})
+
+			tip.UnitType.UIGradient.Color = grad
+			tip.UnitType.UIStroke.Color = dark
+		end
 	end
 
 	local function updateTip()
-		if not selectedSlot then return end
-		local sx, sy = getRelativeScalePos(selectedSlot, toolTipParent, X_OFFSET_PX, Y_OFFSET_PX)
+		if not selectedSlot:IsDescendantOf(game) then
+			return
+		end
+		local sx, sy = getRelativeScalePos(selectedSlot, UnitsMain, X_OFFSET_PX, Y_OFFSET_PX)
 		tip.Position = UDim2.fromScale(sx, sy)
 	end
 
-	local function hookSlot()
-		if SelectedPosConn then SelectedPosConn:Disconnect() end
-		SelectedPosConn = selectedSlot:GetPropertyChangedSignal("AbsolutePosition"):Connect(updateTip)
-		updateTip()
+	if SelectedPosConn then
+		SelectedPosConn:Disconnect()
+		SelectedPosConn = nil
 	end
-	
-	local UnitInInventory = self.KeptData.Units.Inventory[selectedSlot.Name]
-	tip.UnitName.Text = ReplicatedStorage.Assets.Units[UnitInInventory:GetAttribute("Name")]:GetAttribute("DisplayName")
-	tip.Level.Text = "Lv. " .. UnitInInventory:GetAttribute("Level")
 
-	local Rarity = ReplicatedStorage.Assets.Units[UnitInInventory:GetAttribute("Name")]:GetAttribute("Rarity")
-	tip.Rarity.Text = Rarity
-
-	local RarityBaseColor = RarityProperties[Rarity].Color
-	local LightColor = lightenColor(RarityBaseColor, 0.5)
-	local DarkColor = darkenColor(RarityBaseColor, 0.15)
-
-	local RarityGradient = ColorSequence.new{
-		ColorSequenceKeypoint.new(0, LightColor),
-		ColorSequenceKeypoint.new(1, RarityBaseColor)
-	}
-
-	tip.Rarity.UIGradient.Color = RarityGradient
-	tip.Rarity.UIStroke.Color = DarkColor
-	
-	tip.UIStroke.UIGradient.Color = RarityGradient
-
-	local UnitType = ReplicatedStorage.Assets.Units[UnitInInventory:GetAttribute("Name")]:GetAttribute("UnitType")
-	
-	local UnitTypeBaseColor = UnitTypeProperties[UnitType].Color
-	local LightColor = lightenColor(UnitTypeBaseColor, 0.5)
-	local DarkColor = darkenColor(UnitTypeBaseColor, 0.15)
-
-	local UnitTypeGradient = ColorSequence.new{
-		ColorSequenceKeypoint.new(0, LightColor),
-		ColorSequenceKeypoint.new(1, UnitTypeBaseColor)
-	}
-	
-	tip.UnitType.Text = UnitType
-	tip.UnitType.UIGradient.Color = UnitTypeGradient
-	tip.UnitType.UIStroke.Color = DarkColor
-	
-	hookSlot()
+	SelectedPosConn = selectedSlot:GetPropertyChangedSignal("AbsolutePosition"):Connect(updateTip)
+	updateTip()
 end
 
--- @ Update Equip Button State
-function Units_Client:UpdateEquipButtonState(unitFolder, KeptData)
-	local isEquipped = false
-
-	for i = 1, MaxEquipSlots do
-		if KeptData.Units.Equipped:GetAttribute("Unit"..i) == unitFolder.Name then
-			isEquipped = true
-			break
-		end
+--// Equip button visuals
+function Units_Client:UpdateEquipButtonState(unitFolder: Instance)
+	if not unitFolder or not self.KeptData then
+		return
 	end
 
-	-- @ toggle logic
-	if isEquipped then
+	local equipped = isUnitEquipped(self.KeptData, unitFolder)
+	if equipped then
 		equipButton.Base.UIGradient.Color = equipButton:GetAttribute("Unequip")
 		equipButton.Text.Text = "Unequip"
 	else
@@ -350,412 +459,531 @@ function Units_Client:UpdateEquipButtonState(unitFolder, KeptData)
 	end
 end
 
--- @ Select Unit
-function Units_Client:ToggleUnit(selectedSlot)
-	if Helper:DeselectUnit(selectedSlot, nil, CurrentlySelected) == true then 
-		CurrentlySelected = nil 
-
-		local moveTarget = {
-			Position = MainGui:WaitForChild("Buttons"):GetAttribute("Show")
-		}
-		SpringUsage:LaunchSpring(MainGui:WaitForChild("Buttons"), 1, 3, moveTarget, true)
-
-		local moveTarget2 = {
-			Position = MainGui:WaitForChild("HUD"):GetAttribute("Show")
-		}
-		SpringUsage:LaunchSpring(MainGui:WaitForChild("HUD"), 1, 3, moveTarget2, true)
-		
-		local moveTarget3 = {
-			Position = MainGui:WaitForChild("OtherButtons"):GetAttribute("Show")
-		}
-		SpringUsage:LaunchSpring(MainGui:WaitForChild("OtherButtons"), 1, 3, moveTarget3, true)
-
-		local startProps = { Position = Units_Window:GetAttribute("Show") }
-		SpringUsage:LaunchSpring(Units_Window, 0.45, 3, startProps, true)
-
-		Unit_Showcase.Visible = false
-
+--// Selection toggle
+function Units_Client:ToggleUnit(selectedSlot: GuiObject)
+	if not selectedSlot then
 		return
 	end
 
+	-- Helper:DeselectUnit returns true when it handles a deselect (likely same-slot toggle)
+	if Helper:DeselectUnit(selectedSlot, nil, CurrentlySelected) == true then
+		debugPrint("ToggleUnit -> deselect by helper:", selectedSlot.Name)
+		CurrentlySelected = nil
+		hideUnitPopups()
+		springToHudState()
+		return
+	end
+
+	debugPrint("Selected:", selectedSlot.Name)
+
 	CurrentlySelected = selectedSlot
+	applySelectionVisuals(selectedSlot)
+
+	local unitFolder = getUnitFolderFromSlot(self.KeptData, selectedSlot)
+	if unitFolder then
+		self:UpdateEquipButtonState(unitFolder)
+	end
 
 	self:OptionsTip(selectedSlot, unitButtonTip)
-
-	selectedSlot:SetAttribute("CurrentlySelected", true)
-	selectedSlot.SelectedOverlay.Visible = true
-	selectedSlot.Focus.Visible = true
-	selectedSlot.ZIndex = 2
-
---	toolTipParent.Visible = true
-
-	local unitName = selectedSlot.Name
-	local Inventory = self.KeptData.Units.Inventory
-	local unitFolder = Inventory:FindFirstChild(unitName)
-
-	if unitFolder then
-		self:UpdateEquipButtonState(unitFolder, self.KeptData)
-	end
-	
 	unitTip.Visible = false
 	unitButtonTip.Visible = true
 end
 
--- @ Define Slot with Unit Info From Folder
-function Units_Client:DefineSlot(unitFolder, Unit_Slot, isBottomBar, isShowcase)
-	local uFName = ""
-	local Unit_To_View 
-	
-	if unitFolder then
-		uFName = unitFolder:GetAttribute("Name") or unitFolder.Name
-		Unit_To_View = ReplicatedStorage.Assets.Units[uFName].Model:Clone()
-	else
-		Unit_To_View = ReplicatedStorage.Assets.Objects.Rig:Clone()
-	end
-	
-	local Location = Unit_Slot.ViewportFrame.WorldModel
-	if isShowcase then Location = Unit_Slot.WorldModel end
-	
-	Unit_To_View.Name = "Rig"
-	Unit_To_View:ScaleTo(1)
-	Unit_To_View.PrimaryPart = Unit_To_View:WaitForChild("HumanoidRootPart")
-	Unit_To_View.Parent = Location
-	Unit_To_View:PivotTo(Location.Rig.PrimaryPart.CFrame)
-	Unit_To_View.Humanoid:LoadAnimation(ReplicatedStorage.Assets.Animations.Idle):Play()
+--// Slot viewport rendering
+function Units_Client:DefineSlot(unitFolder: Instance?, Unit_Slot: Instance, isBottomBar: boolean, isShowcase: boolean?)
+	local unitModel: Model
 
-	Location.Rig:Destroy()
-	
+	if unitFolder then
+		local uFName = unitFolder:GetAttribute("Name") or unitFolder.Name
+		local unitAsset = UnitsAssets:FindFirstChild(uFName)
+		if unitAsset and unitAsset:FindFirstChild("Model") then
+			unitModel = unitAsset.Model:Clone()
+		else
+			unitModel = Objects.Rig:Clone()
+		end
+	else
+		unitModel = Objects.Rig:Clone()
+	end
+
+	local location = Unit_Slot.ViewportFrame.WorldModel
+	if isShowcase then
+		location = Unit_Slot.WorldModel
+	end
+
+	unitModel.Name = "Rig"
+	unitModel:ScaleTo(1)
+	unitModel.PrimaryPart = unitModel:WaitForChild("HumanoidRootPart")
+	unitModel.Parent = location
+
+	-- Align to existing anchor rig (we destroy it afterwards).
+	local anchorRig = location:FindFirstChild("Rig")
+	if anchorRig and anchorRig:FindFirstChild("PrimaryPart") then
+		unitModel:PivotTo(anchorRig.PrimaryPart.CFrame)
+	elseif anchorRig and anchorRig:FindFirstChild("HumanoidRootPart") then
+		unitModel:PivotTo(anchorRig.HumanoidRootPart.CFrame)
+	end
+
+	local humanoid = unitModel:FindFirstChildOfClass("Humanoid")
+	if humanoid and Animations:FindFirstChild("Idle") then
+		humanoid:LoadAnimation(Animations.Idle):Play()
+	end
+
+	if anchorRig then
+		anchorRig:Destroy()
+	end
+
 	return isBottomBar
 end
 
-
-function Units_Client:BindSlot(unitFolder, Unit_Slot, isBottomBar, canRegularOpen)
+--// Slot click binding
+function Units_Client:BindSlot(unitFolder: Instance?, Unit_Slot: GuiObject, isBottomBar: boolean, canRegularOpen: boolean?)
 	if SlotConnections[Unit_Slot] then
 		SlotConnections[Unit_Slot]:Disconnect()
 		SlotConnections[Unit_Slot] = nil
 	end
 
-	if unitFolder ~= nil then
-		local realSlot = isBottomBar
-			and Unit_Slots_Holder:FindFirstChild(unitFolder.Name)
-			or Unit_Slot
-		
-		SlotConnections[Unit_Slot] = Unit_Slot.TextButton.MouseButton1Up:Connect(function()
-			local realSlot = isBottomBar
-				and Unit_Slots_Holder:FindFirstChild(unitFolder.Name)
-				or Unit_Slot
+	local button = Unit_Slot:FindFirstChild("TextButton", true)
+	if not button or not button:IsA("GuiButton") then
+		return
+	end
 
-			local toggled = false
+	if unitFolder then
+		SlotConnections[Unit_Slot] = button.MouseButton1Up:Connect(function()
+			local realSlot = Unit_Slot
+
+			if isBottomBar then
+				local invSlot = Unit_Slots_Holder:FindFirstChild(unitFolder.Name)
+				if invSlot then
+					realSlot = invSlot
+				end
+			end
 
 			if CurrentlySelected == realSlot then
-				if toggled == false then toggled = true self:ToggleUnit(realSlot) end
+				debugPrint("Clicked selected slot again -> deselect:", realSlot.Name)
+				self:ToggleUnit(realSlot)
 				CurrentlySelected = nil
 				return
 			end
 
 			if isBottomBar then
-				QuickFunctions:OpenWindow(
-					MainGui:WaitForChild("Buttons"):WaitForChild("Units")
-				)
+				debugPrint("Bottom bar click -> opening Units window")
+				QuickFunctions:OpenWindow(MainGui.Buttons.Units)
 			end
 
-			if toggled == false then toggled = true self:ToggleUnit(realSlot) end
+			self:ToggleUnit(realSlot)
 			self:UpdateShowcase(unitFolder)
 			CurrentlySelected = realSlot
 		end)
-	elseif canRegularOpen then
-		SlotConnections[Unit_Slot] = Unit_Slot.TextButton.MouseButton1Up:Connect(function()
-			if isBottomBar  and Units_Window.Visible == false then
-				CurrentlySelected = nil
-				
-				QuickFunctions:OpenWindow(
-					MainGui:WaitForChild("Buttons"):WaitForChild("Units")
-				)
-			end
-		end)		
+
+		return
 	end
+
+	if not canRegularOpen then
+		return
+	end
+
+	SlotConnections[Unit_Slot] = button.MouseButton1Up:Connect(function()
+		if not isBottomBar then
+			return
+		end
+		if Units_Window.Visible then
+			return
+		end
+
+		debugPrint("Clicked empty bottom bar slot -> opening Units window")
+		CurrentlySelected = nil
+		QuickFunctions:OpenWindow(MainGui.Buttons.Units)
+	end)
 end
 
--- @ Create Unit Slot From Folder
-function Units_Client:CreateUnitSlot(unitFolder)
-	if Unit_Slots_Holder:FindFirstChild(unitFolder.Name) then return end
+--// Inventory slot creation/update
+function Units_Client:CreateUnitSlot(unitFolder: Instance)
+	if Unit_Slots_Holder:FindFirstChild(unitFolder.Name) then
+		return
+	end
 
 	local Unit_Slot = Samples.sampleUnitSlot:Clone()
 	Unit_Slot.Name = unitFolder.Name
 	Unit_Slot.Visible = true
 	Unit_Slot.Parent = Unit_Slots_Holder
-	
 	Unit_Slot:SetAttribute("UnitName", unitFolder:GetAttribute("UnitName"))
 
-	self:BindSlot(unitFolder, Unit_Slot, self:DefineSlot(unitFolder, Unit_Slot))
+	self:DefineSlot(unitFolder, Unit_Slot, false)
+	self:BindSlot(unitFolder, Unit_Slot, false)
 	self:UpdateUnitSlot(unitFolder, Unit_Slot)
 end
 
--- @ Update Unit Slot Info
-function Units_Client:UpdateUnitSlot(unitFolder, BottomBarSlot)
-	local Unit_Slot = Unit_Slots_Holder:FindFirstChild(unitFolder.Name)
-	if not Unit_Slot and not BottomBarSlot then return end
+function Units_Client:UpdateUnitSlot(unitFolder: Instance, overrideSlot: GuiObject?)
+	if not unitFolder then
+		return
+	end
 
-	if BottomBarSlot then Unit_Slot = BottomBarSlot end
-		
-	local UnitName = ReplicatedStorage.Assets.Units[unitFolder:GetAttribute("Name")]:GetAttribute("DisplayName") or "Unknown"
-	local Level = unitFolder:GetAttribute("Level") or 1
-	local Rarity = ReplicatedStorage.Assets.Units[unitFolder:GetAttribute("Name")]:GetAttribute("Rarity") or "Rare"
-	local Equipped = unitFolder:GetAttribute("Equipped")
+	local Unit_Slot = overrideSlot or Unit_Slots_Holder:FindFirstChild(unitFolder.Name)
+	if not Unit_Slot then
+		return
+	end
+
+	local unitNameKey = unitFolder:GetAttribute("Name") or unitFolder.Name
+	local unitAsset = UnitsAssets:FindFirstChild(unitNameKey)
+
+	local displayName = unitAsset and unitAsset:GetAttribute("DisplayName") or "Unknown"
+	local level = unitFolder:GetAttribute("Level") or 1
+	local rarity = unitAsset and unitAsset:GetAttribute("Rarity") or "Rare"
+	local equipped = unitFolder:GetAttribute("Equipped")
 
 	local NameText = Unit_Slot:FindFirstChild("NameText", true)
 	local LevelText = Unit_Slot:FindFirstChild("LevelText", true)
-	local Crest = Unit_Slot.MiddleStroke:WaitForChild("UIStroke")
+	local CrestStroke = Unit_Slot:FindFirstChild("MiddleStroke", true)
+		and Unit_Slot.MiddleStroke:FindFirstChild("UIStroke")
 	local Base = Unit_Slot:FindFirstChild("Base", true)
 
-	if NameText then NameText.Text = UnitName end
-	if LevelText then LevelText.Text = tostring(Level) end
+	if NameText then NameText.Text = displayName end
+	if LevelText then LevelText.Text = tostring(level) end
 
-	Unit_Slot.LayoutOrder = 100 - getRarityOrder(Rarity)
+	Unit_Slot.LayoutOrder = 100 - getRarityOrder(rarity)
 
-	local BaseColor = RarityProperties[Rarity].Color
-	local LightColor = lightenColor(BaseColor, 0.5)
-	local Gradient = ColorSequence.new{
-		ColorSequenceKeypoint.new(0, LightColor),
-		ColorSequenceKeypoint.new(1, BaseColor)
-	}
+	local rarityProps = RarityProperties[rarity]
+	if rarityProps and Base then
+		local baseColor = rarityProps.Color
+		local light = lightenColor(baseColor, 0.5)
 
-	Base.ImageColor3 = darkenColor(BaseColor, 0.3)
-	Base.BackgroundColor3 = darkenColor(BaseColor, 0.9)
-	Crest.UIGradient.Color = ReplicatedStorage.Settings.RarityOverlays:GetAttribute(Rarity) -- Gradient
-	Unit_Slot.UIGradient.Color = Gradient
-	Unit_Slot.GradientOverlay.UIGradient.Color = ReplicatedStorage.Settings.RarityOverlays:GetAttribute(Rarity)
-	
-	-- @ Equipped Highlight
-	if not BottomBarSlot then
-		if Equipped then
-			Unit_Slot.LayoutOrder = -9999
+		local grad = ColorSequence.new({
+			ColorSequenceKeypoint.new(0, light),
+			ColorSequenceKeypoint.new(1, baseColor),
+		})
+
+		Base.ImageColor3 = darkenColor(baseColor, 0.3)
+		Base.BackgroundColor3 = darkenColor(baseColor, 0.9)
+
+		if Unit_Slot:FindFirstChild("UIGradient") then
+			Unit_Slot.UIGradient.Color = grad
+		end
+
+		if Unit_Slot:FindFirstChild("GradientOverlay") and Unit_Slot.GradientOverlay:FindFirstChild("UIGradient") then
+			local overlayGrad = Settings:WaitForChild("RarityOverlays"):GetAttribute(rarity)
+			if overlayGrad then
+				Unit_Slot.GradientOverlay.UIGradient.Color = overlayGrad
+				if CrestStroke and CrestStroke:FindFirstChild("UIGradient") then
+					CrestStroke.UIGradient.Color = overlayGrad
+				end
+			end
+		end
+	end
+
+	-- Equipped highlight is only meaningful in the inventory list.
+	if overrideSlot then
+		return
+	end
+
+	if equipped then
+		Unit_Slot.LayoutOrder = -9999
+		if Unit_Slot:FindFirstChild("Tick") then
 			Unit_Slot.Tick.Visible = true
-		else
-			Unit_Slot.LayoutOrder = 100 - getRarityOrder(Rarity)
+		end
+	else
+		Unit_Slot.LayoutOrder = 100 - getRarityOrder(rarity)
+		if Unit_Slot:FindFirstChild("Tick") then
 			Unit_Slot.Tick.Visible = false
 		end
 	end
 end
 
--- @ Remove Unit Slot
-function Units_Client:RemoveUnitSlot(unitFolder)
+function Units_Client:RemoveUnitSlot(unitFolder: Instance)
 	local slot = Unit_Slots_Holder:FindFirstChild(unitFolder.Name)
-	if slot then slot:Destroy() end
+	if slot then
+		slot:Destroy()
+	end
 end
 
--- @ Apply Search Filter on Unit Names
+--// Search filtering
 function Units_Client:ApplySearchFilter()
-	local query = string.lower(SearchBox.Text)
+	local query = string.lower(SearchBox.Text or "")
+
 	for _, slot in ipairs(Unit_Slots_Holder:GetChildren()) do
-		if slot:IsA("GuiObject") and slot.Name ~= "UIListLayout" then
-			local name = string.lower((slot:FindFirstChild("NameText") and slot.NameText.Text) or "")
-			slot.Visible = (query == "") or name:find(query, 1, true) ~= nil
+		if not slot:IsA("GuiObject") then
+			continue
+		end
+		if slot.Name == "UIListLayout" then
+			continue
+		end
+
+		local label = slot:FindFirstChild("NameText", true)
+		local name = label and string.lower(label.Text) or ""
+		slot.Visible = (query == "") or (name:find(query, 1, true) ~= nil)
+	end
+end
+
+--// Bottom bar syncing helpers
+local function setBottomBarEmptyVisual(currentSlot: Instance, isEmpty: boolean)
+	local unitFrame = currentSlot:WaitForChild("Unit")
+	unitFrame.ImageTransparency = isEmpty and 1 or 0
+	unitFrame.Empty.Visible = isEmpty
+
+	for _, child in ipairs(unitFrame:GetChildren()) do
+		if child:HasTag("EmptyInvis") then
+			child.Visible = not isEmpty
 		end
 	end
 end
 
--- @ Set Up GUI and Real-Time Syncing
+function Units_Client:_UpdateBottomBarSlot(KeptData, slotKey: string, input: any)
+	local hudSlots = MainGui:WaitForChild("HUD"):WaitForChild("Slots")
+	local currentSlot = hudSlots:WaitForChild(slotKey)
+	local unitFrame = currentSlot:WaitForChild("Unit")
+
+	if input == "Locked" then
+		debugPrint("BottomBar", slotKey, "is Locked")
+		currentSlot:SetAttribute("UnitName", "")
+		return
+	end
+
+	if input == "Empty" or input == nil then
+		debugPrint("BottomBar", slotKey, "is Empty")
+		setBottomBarEmptyVisual(currentSlot, true)
+		self:DefineSlot(nil, unitFrame, true)
+		self:BindSlot(nil, unitFrame, true, true)
+		currentSlot:SetAttribute("UnitName", "")
+		return
+	end
+
+	local inv = getInventory(KeptData)
+	if not inv then
+		return
+	end
+
+	local unitFolder = inv:FindFirstChild(input)
+	if not unitFolder then
+		debugWarn("BottomBar", slotKey, "references missing unit:", tostring(input))
+		setBottomBarEmptyVisual(currentSlot, true)
+		currentSlot:SetAttribute("UnitName", "")
+		return
+	end
+
+	debugPrint("BottomBar", slotKey, "->", unitFolder.Name)
+
+	setBottomBarEmptyVisual(currentSlot, false)
+	self:DefineSlot(unitFolder, unitFrame, true)
+	self:BindSlot(unitFolder, unitFrame, true)
+	self:UpdateUnitSlot(unitFolder, unitFrame)
+
+	currentSlot:SetAttribute("UnitName", unitFolder:GetAttribute("UnitName") or "")
+end
+
+--// Click outside to deselect
+local function clickedInsideTaggedGui(tagName: string, x: number, y: number): boolean
+	for _, guiObject in ipairs(CollectionService:GetTagged(tagName)) do
+		if not guiObject:IsA("GuiObject") then
+			continue
+		end
+		if not guiObject.Visible then
+			continue
+		end
+
+		local pos = guiObject.AbsolutePosition
+		local size = guiObject.AbsoluteSize
+
+		if x >= pos.X and x <= pos.X + size.X and y >= pos.Y and y <= pos.Y + size.Y then
+			return true
+		end
+	end
+
+	return false
+end
+
+--// Init
 function Units_Client:Init(KeptData)
 	self.KeptData = KeptData
-	
-	local Inventory = KeptData.Units.Inventory
 
-	-- @ Initial Population
+	local Inventory = getInventory(KeptData)
+	if not Inventory then
+		debugWarn("Init called without KeptData.Units.Inventory")
+		return
+	end
+
+	debugPrint("Init inventory size:", #Inventory:GetChildren())
+
+	-- Initial inventory UI
 	for _, unitFolder in ipairs(Inventory:GetChildren()) do
 		self:CreateUnitSlot(unitFolder)
 	end
 
-	-- @ Real-Time Add/Remove
+	-- Keep UI synced with inventory changes
 	Inventory.ChildAdded:Connect(function(unitFolder)
+		debugPrint("Inventory ChildAdded:", unitFolder.Name)
 		self:CreateUnitSlot(unitFolder)
 	end)
 
 	Inventory.ChildRemoved:Connect(function(unitFolder)
+		debugPrint("Inventory ChildRemoved:", unitFolder.Name)
 		self:RemoveUnitSlot(unitFolder)
 	end)
 
-	-- @ Function for Updating BottomBar
-	local function UpdateBottomBar(input, slot)
-		local currentSlot = MainGui:WaitForChild("HUD"):WaitForChild("Slots"):WaitForChild(slot)
-		if input ~= "Empty" and input ~= "Locked" then
-			currentSlot.Unit.ImageTransparency = 0
-			currentSlot.Unit.Empty.Visible = false
-			for _, UIInstance in pairs (currentSlot.Unit:GetChildren()) do
-				if UIInstance:HasTag("EmptyInvis") then
-					UIInstance.Visible = true
-				end
-			end
-			
-			local UnitFolder = Inventory[input]
-			self:BindSlot(UnitFolder, currentSlot:WaitForChild("Unit"), self:DefineSlot(UnitFolder, currentSlot:WaitForChild("Unit"), true))
-			self:UpdateUnitSlot(UnitFolder, currentSlot:WaitForChild("Unit"))
-			
-			currentSlot:SetAttribute("UnitName", UnitFolder:GetAttribute("UnitName"))
-		elseif input == "Empty" then
-			currentSlot.Unit.ImageTransparency = 1
-			currentSlot.Unit.Empty.Visible = true
-			for _, UIInstance in pairs (currentSlot.Unit:GetChildren()) do
-				if UIInstance:HasTag("EmptyInvis") then
-					UIInstance.Visible = false
-				end
-			end
-			
-			self:DefineSlot(nil, currentSlot.Unit, true)
-			self:BindSlot(nil, currentSlot:WaitForChild("Unit"), true, true)
-			
-			currentSlot:SetAttribute("UnitName", "")
-		elseif input == "Locked" then
-			
-			currentSlot:SetAttribute("UnitName", "")
-		end
-	end
-	
-	-- @ Initial BottomBar Population
+	-- Bottom bar initial + live updates
 	for i = 1, MaxEquipSlots do
-		local UnitData_Slot_Input = KeptData.Units.Equipped:GetAttribute("Unit" .. tostring(i))
-		UpdateBottomBar(UnitData_Slot_Input, "Unit" .. tostring(i))
-		
-		KeptData.Units.Equipped:GetAttributeChangedSignal("Unit" .. tostring(i)):Connect(function() -- @ Listen for Future BottomBar Updates
-			local newInput = KeptData.Units.Equipped:GetAttribute("Unit" .. tostring(i))
-			UpdateBottomBar(newInput, "Unit" .. tostring(i))
+		local key = "Unit" .. tostring(i)
+		local current = KeptData.Units.Equipped:GetAttribute(key)
+		self:_UpdateBottomBarSlot(KeptData, key, current)
+
+		KeptData.Units.Equipped:GetAttributeChangedSignal(key):Connect(function()
+			local nextVal = KeptData.Units.Equipped:GetAttribute(key)
+			self:_UpdateBottomBarSlot(KeptData, key, nextVal)
 		end)
 	end
 
-	-- @ Listen to when Unit Window is invisible
-	Units_Window:GetPropertyChangedSignal("Visible"):Connect(function()
-		if Units_Window.Visible then
-			task.delay(0.05, function()
-				local cachedItems = {}
-				for _, slot in Unit_Slots_Holder:GetChildren() do
-					if slot:IsA("ImageLabel") then
-						table.insert(cachedItems, slot.GradientOverlay.UIGradient)
-						table.insert(cachedItems, slot.MiddleStroke.UIStroke.UIGradient)
-					end
-				end
-				StartGradientLoop(cachedItems, 2.5)
-			end)
-		else
-			CurrentlySelected = nil
-			Players:SetAttribute("SelectingProfileSlot", nil)
-
-			if activeGradientLoop.cancel then
-				activeGradientLoop.cancel()
-			end
-
-			if SelectedPosConn then SelectedPosConn:Disconnect() end
-		end
-	end)
-
-	-- @ Attribute Watchers
+	-- Watch per-unit attributes (level & equipped)
 	for _, unitFolder in ipairs(Inventory:GetChildren()) do
 		unitFolder:GetAttributeChangedSignal("Level"):Connect(function()
 			self:UpdateUnitSlot(unitFolder)
 		end)
+
 		unitFolder:GetAttributeChangedSignal("Equipped"):Connect(function()
 			self:UpdateUnitSlot(unitFolder)
 		end)
 	end
 
-	-- @ Search Box Input
+	-- Search box -> filter + feedback sound
 	SearchBox:GetPropertyChangedSignal("Text"):Connect(function()
-		SoundService.SFX.Key:Play()
+		if SoundService:FindFirstChild("SFX") and SoundService.SFX:FindFirstChild("Key") then
+			SoundService.SFX.Key:Play()
+		end
 		self:ApplySearchFilter()
 	end)
-	
-	-- @ Add Unit Option Connections
-	local EquipButton = equipButton.MouseButton1Click:Connect(function()
-		if CurrentlySelected then
-			local unitName = CurrentlySelected.Name
-			local Inventory = KeptData.Units.Inventory
-			local unitFolder = Inventory:FindFirstChild(unitName)
 
-			if unitFolder then
-				local equipped = false
-				local equippedSlot = nil
+	-- Window visibility -> gradient loop + cleanup
+	Units_Window:GetPropertyChangedSignal("Visible"):Connect(function()
+		if Units_Window.Visible then
+			debugPrint("Units window opened")
 
-				for i = 1, MaxEquipSlots do
-					local slotName = "Unit" .. tostring(i)
-					local current = KeptData.Units.Equipped:GetAttribute(slotName)
+			task.delay(0.05, function()
+				local cached = {}
 
-					if current == unitFolder.Name then
-						equipped = true
-						equippedSlot = slotName
-						break
+				for _, slot in ipairs(Unit_Slots_Holder:GetChildren()) do
+					if slot:IsA("ImageLabel") then
+						local overlayGrad = slot:FindFirstChild("GradientOverlay", true)
+							and slot.GradientOverlay:FindFirstChild("UIGradient")
+
+						local strokeGrad = slot:FindFirstChild("MiddleStroke", true)
+							and slot.MiddleStroke:FindFirstChild("UIStroke")
+							and slot.MiddleStroke.UIStroke:FindFirstChild("UIGradient")
+
+						if overlayGrad then table.insert(cached, overlayGrad) end
+						if strokeGrad then table.insert(cached, strokeGrad) end
 					end
 				end
-				
-				if equipped == true then deselectCurrentUnit() end
-				
-				UnitOptions:ToggleEquip(unitFolder, KeptData)
-			end
-		end
-	end)
-		
-	local ViewButton = viewButton.MouseButton1Click:Connect(function()
-		if CurrentlySelected then
-			local unitName = CurrentlySelected.Name
-			local Inventory = KeptData.Units.Inventory
-			local unitFolder = Inventory:FindFirstChild(unitName)
 
-			if unitFolder then
-				UnitOptions:ToggleView(unitFolder, KeptData, Units_Window)
-			end
-		end
-	end)
-		
-	local CancelButton = cancelButton.MouseButton1Click:Connect(function()
-		if CurrentlySelected then
-			local unitName = CurrentlySelected.Name
-			local Inventory = KeptData.Units.Inventory
-			local unitFolder = Inventory:FindFirstChild(unitName)
+				StartGradientLoop(cached, 2.5)
+			end)
 
-			if unitFolder then
-				self:ToggleUnit(CurrentlySelected)
-			end
+			return
 		end
-	end)
-	
-	local LockButton = lockButton.MouseButton1Click:Connect(function()
-		if CurrentlySelected then
-			local unitName = CurrentlySelected.Name
-			local Inventory = KeptData.Units.Inventory
-			local unitFolder = Inventory:FindFirstChild(unitName)
 
-			if unitFolder then
-				UnitOptions:ToggleLock(unitFolder, KeptData, Units_Window)
-			end
+		debugPrint("Units window closed -> clearing selection")
+
+		CurrentlySelected = nil
+		Players:SetAttribute("SelectingProfileSlot", nil)
+
+		if activeGradientLoop.cancel then
+			activeGradientLoop.cancel()
+		end
+
+		if SelectedPosConn then
+			SelectedPosConn:Disconnect()
+			SelectedPosConn = nil
 		end
 	end)
-	
-	local unequipAllButton = unequipAllButton.MouseButton1Click:Connect(function()
-		UnitOptions:UnequipAll(Units_Client.KeptData)
+
+	-- Option buttons
+	equipButton.MouseButton1Click:Connect(function()
+		if not CurrentlySelected then
+			return
+		end
+
+		local unitFolder = getUnitFolderFromSlot(KeptData, CurrentlySelected)
+		if not unitFolder then
+			return
+		end
+
+		-- If unequipping, close selection to avoid stale state (UI says selected but no longer equipped).
+		if isUnitEquipped(KeptData, unitFolder) then
+			deselectCurrentUnit()
+		end
+
+		debugPrint("Equip toggle:", unitFolder.Name)
+		UnitOptions:ToggleEquip(unitFolder, KeptData)
+	end)
+
+	viewButton.MouseButton1Click:Connect(function()
+		if not CurrentlySelected then
+			return
+		end
+
+		local unitFolder = getUnitFolderFromSlot(KeptData, CurrentlySelected)
+		if not unitFolder then
+			return
+		end
+
+		debugPrint("View:", unitFolder.Name)
+		UnitOptions:ToggleView(unitFolder, KeptData, Units_Window)
+	end)
+
+	cancelButton.MouseButton1Click:Connect(function()
+		if not CurrentlySelected then
+			return
+		end
+
+		debugPrint("Cancel selection:", CurrentlySelected.Name)
+		self:ToggleUnit(CurrentlySelected)
+	end)
+
+	lockButton.MouseButton1Click:Connect(function()
+		if not CurrentlySelected then
+			return
+		end
+
+		local unitFolder = getUnitFolderFromSlot(KeptData, CurrentlySelected)
+		if not unitFolder then
+			return
+		end
+
+		debugPrint("Lock toggle:", unitFolder.Name)
+		UnitOptions:ToggleLock(unitFolder, KeptData, Units_Window)
+	end)
+
+	UnequipAllButton.MouseButton1Click:Connect(function()
+		debugPrint("Unequip all")
+		UnitOptions:UnequipAll(self.KeptData)
 		deselectCurrentUnit()
 	end)
-	
+
+	-- Click-outside deselect (tag-protected)
 	UserInputService.InputEnded:Connect(function(input, gameProcessed)
-		if input.UserInputType == Enum.UserInputType.Touch or input.UserInputType == Enum.UserInputType.MouseButton1 then
-			local function clickedInsideTaggedGui(tagName, x, y)
-				for _, guiObject in ipairs(CollectionService:GetTagged(tagName)) do
-					if guiObject:IsA("GuiObject") and guiObject.Visible then
-						local pos = guiObject.AbsolutePosition
-						local size = guiObject.AbsoluteSize
-						if x >= pos.X and x <= pos.X + size.X and y >= pos.Y and y <= pos.Y + size.Y then
-							return true
-						end
-					end
-				end
-				return false
-			end
-
-			local mouseLocation = UserInputService:GetMouseLocation()
-			local x, y = mouseLocation.X, mouseLocation.Y
-			local DeselectProtection = clickedInsideTaggedGui("DeselectProtection", x, y)
-
-			if Units_Window.Visible and not DeselectProtection and CurrentlySelected then
-				deselectCurrentUnit()
-			end
+		if gameProcessed then
+			return
 		end
+
+		local t = input.UserInputType
+		if t ~= Enum.UserInputType.Touch and t ~= Enum.UserInputType.MouseButton1 then
+			return
+		end
+
+		if not Units_Window.Visible then
+			return
+		end
+		if not CurrentlySelected then
+			return
+		end
+
+		local mouseLocation = UserInputService:GetMouseLocation()
+		local x, y = mouseLocation.X, mouseLocation.Y
+
+		local protected = clickedInsideTaggedGui("DeselectProtection", x, y)
+		if protected then
+			debugPrint("Click inside DeselectProtection -> ignoring")
+			return
+		end
+
+		debugPrint("Click outside -> deselect")
+		deselectCurrentUnit()
 	end)
 end
 
